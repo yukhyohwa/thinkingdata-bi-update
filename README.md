@@ -1,12 +1,16 @@
-# FiveCross TDBI Report Updater
+# ThinkingData BI Update
 
 Automatically refreshes a ThinkingData report from a local SQL file. It reuses the data-client browser-session flow: persistent login, session validation, automatic re-login, and a separate session for China and international ThinkingData.
+
+Repository: <https://github.com/yukhyohwa/thinkingdata-bi-update>
 
 Unlike `fivecross-data-client`, this tool does **not** download query results. It copies the local SQL, selects all old SQL in the editor, pastes over it, calculates it, waits for **全量下载 / Download All** to confirm completion, clicks **更新报表 / Update Report**, then clicks **更新 / Update** in the confirmation dialog. It is also compatible with a first-level **保存报表 / Save Report** button.
 
 ## Setup
 
 ```powershell
+git clone https://github.com/yukhyohwa/thinkingdata-bi-update.git
+cd thinkingdata-bi-update
 Copy-Item .env.example .env
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

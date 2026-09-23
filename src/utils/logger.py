@@ -8,4 +8,4 @@ logging.basicConfig(
     datefmt="[%X]",
     handlers=[RichHandler(rich_tracebacks=True)],
 )
-logger = logging.getLogger("tdbi-update")
+logger = logging.getLogger("thinkingdata-bi-update")
