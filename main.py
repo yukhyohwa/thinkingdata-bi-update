@@ -50,6 +50,8 @@ def main() -> None:
     parser.add_argument("sql_file", nargs="?", help="SQL file name in input/, or a relative/absolute SQL path")
     parser.add_argument("--login", metavar="SQL_FILE", help="Log in and save a session for the SQL file's target instance")
     parser.add_argument("--show", action="store_true", help="Show the browser window while running")
+    parser.add_argument("--inspect", metavar="OUTPUT_DIR", help="Read saved SQL and page state in background without saving")
+    parser.add_argument("--panel-url", help="Optionally inspect a known parent dashboard after reading saved SQL")
     args = parser.parse_args()
 
     file_name = args.login or args.sql_file
@@ -57,6 +59,9 @@ def main() -> None:
         parser.error("provide a SQL file, e.g. python main.py report.sql")
     sql, sql_url = read_sql_task(file_name)
     engine = build_engine(sql_url)
+    if args.inspect:
+        engine.inspect_report(args.inspect, panel_url=args.panel_url)
+        return
     if args.login:
         engine.login()
         return

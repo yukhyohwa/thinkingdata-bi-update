@@ -3,6 +3,7 @@ import re
 import shutil
 import stat
 import time
+from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
@@ -78,7 +79,7 @@ class ThinkingDataEngine(BaseEngine):
         return "login" in page.url.lower() or bool(page.query_selector('input[type="password"]'))
 
     @staticmethod
-    def _wait_for_login_or_ide(page, timeout: int = 30000):
+    def _wait_for_login_or_ide(page, timeout: int = 60000):
         """Wait for an actual authenticated IDE or a login form after SPA navigation."""
         try:
             page.wait_for_selector(
@@ -86,8 +87,23 @@ class ThinkingDataEngine(BaseEngine):
                 timeout=timeout,
             )
         except Exception:
-            # The subsequent login check gives a clearer failure if the site did not render.
-            pass
+            hint = page.get_by_text(re.compile('^(我知道了|已知晓)$'))
+            if hint.count() and hint.first.is_visible():
+                hint.first.click()
+                logger.info("Dismissed first-use navigation hint.")
+                try:
+                    page.wait_for_selector(
+                        '.monaco-editor, .CodeMirror, .ace_editor, .tant-monaco-editor, input[type="password"]',
+                        timeout=timeout,
+                    )
+                    return
+                except Exception:
+                    pass
+            logger.warning("Editor/login did not become ready. URL: %s", page.url)
+            logger.warning("Page title: %s", page.title())
+            logger.warning("Visible page state: %s", page.locator('body').inner_text(timeout=3000)[:4000])
+            logger.warning("Frames: %s", [frame.url for frame in page.frames])
+            raise RuntimeError('Neither SQL editor nor login form became ready; refusing to treat the URL as a valid session.')
 
     def _perform_login_logic(self, page):
         user_input = page.wait_for_selector(
@@ -118,11 +134,11 @@ class ThinkingDataEngine(BaseEngine):
         self._click(page, button)
         page.wait_for_timeout(5000)
 
-    def login(self, retried: bool = False):
-        """Open a visible browser once to establish the persistent session."""
+    def login(self, retried: bool = False, show_window: bool = True):
+        """Establish the persistent session, keeping automatic recovery in background."""
         try:
             with sync_playwright() as playwright:
-                context = self._launch(playwright.chromium, show_window=True)
+                context = self._launch(playwright.chromium, show_window=show_window)
                 try:
                     page = context.new_page()
                     # Validate the exact report IDE URL, not only the product home page.
@@ -157,10 +173,46 @@ class ThinkingDataEngine(BaseEngine):
             logger.warning("Saved session could not launch: %s", exc)
             self._clear_session()
             logger.info("Retrying the browser launch once with a fresh session.")
-            return self.login(retried=True)
+            return self.login(retried=True, show_window=show_window)
 
     def fetch(self, sql: str, **kwargs):
         return self.save_report(sql, show_window=kwargs.get("show_window", False))
+
+    def inspect_report(self, output_dir: str, panel_url: str | None = None):
+        """Read saved SQL and visible report state without changing the report."""
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = self._launch(playwright.chromium, False)
+            try:
+                page = context.new_page()
+                page.goto(self.sql_url, timeout=90000, wait_until="commit")
+                self._wait_for_login_or_ide(page, timeout=60000)
+                if self._is_login_page(page):
+                    raise RuntimeError("Inspection needs an authenticated report session.")
+                editor = page.wait_for_selector('.monaco-editor, .CodeMirror, .ace_editor, textarea, .tant-monaco-editor', timeout=60000)
+                self._click(page, editor)
+                page.keyboard.press('Control+A')
+                page.keyboard.press('Control+C')
+                sql = page.evaluate('() => navigator.clipboard.readText()')
+                if not re.search(r'\bSELECT\b', sql, re.IGNORECASE):
+                    raise RuntimeError('Editor copy did not return SQL.')
+                (out / 'remote.sql').write_text(sql, encoding='utf-8')
+                (out / 'page.txt').write_text(page.locator('body').inner_text(), encoding='utf-8')
+                page.screenshot(path=str(out / 'page.png'), full_page=True)
+                if panel_url:
+                    from urllib.parse import urlsplit
+                    if urlsplit(panel_url).netloc != urlsplit(self.sql_url).netloc:
+                        raise ValueError('Panel inspection must use the same ThinkingData host.')
+                    page.goto(panel_url, timeout=90000, wait_until='commit')
+                    page.get_by_text('KPI预估与达成', exact=True).first.wait_for(state='visible', timeout=60000)
+                    # Dashboard charts can draw date labels on canvas rather than DOM text.
+                    page.wait_for_timeout(3000)
+                    (out / 'panel.txt').write_text(page.locator('body').inner_text(), encoding='utf-8')
+                    page.screenshot(path=str(out / 'panel.png'), full_page=True)
+                logger.info('Read-only report snapshot saved to %s', out)
+            finally:
+                context.close()
 
     def _replace_sql_by_paste(self, page, sql_text: str):
         """Use the editor's native select-all/paste flow so saved custom parameters stay intact."""
@@ -208,6 +260,9 @@ class ThinkingDataEngine(BaseEngine):
         ).last
         dialog.wait_for(state="visible", timeout=15000)
 
+        if '图表未正常展示' in dialog.inner_text():
+            raise RuntimeError('Chart bindings are invalid; preserve the saved report column aliases before updating.')
+
         buttons = dialog.locator('button, [role="button"]')
         confirm = None
         for index in range(buttons.count()):
@@ -235,6 +290,7 @@ class ThinkingDataEngine(BaseEngine):
                 except Exception:
                     continue
         if confirm is None:
+            logger.warning("Update dialog text: %s", dialog.inner_text())
             raise RuntimeError("Update confirmation dialog appeared, but its 更新 / Update button was not found.")
 
         logger.info("Confirmation dialog opened; clicking its 更新 / Update button.")
@@ -252,8 +308,7 @@ class ThinkingDataEngine(BaseEngine):
                     if retried:
                         raise
                     logger.warning("Saved session could not launch: %s", exc)
-                    self._clear_session()
-                    return self.save_report(sql_text, show_window, retried=True)
+                    raise _BrowserLaunchFailed() from exc
                 try:
                     page = context.new_page()
                     logger.info("Opening report SQL URL: %s", self.sql_url)
@@ -315,8 +370,12 @@ class ThinkingDataEngine(BaseEngine):
                     raise TimeoutError("Calculation did not finish within 60 minutes.")
                 finally:
                     context.close()
+        except _BrowserLaunchFailed:
+            # Retry only after sync_playwright has exited; nesting it creates an asyncio error.
+            self._clear_session()
+            return self.save_report(sql_text, show_window, retried=True)
         except _NeedsFreshLogin:
             logger.info("Session expired; logging in again.")
             self._clear_session()
-            self.login()
+            self.login(show_window=show_window)
             return self.save_report(sql_text, show_window, retried=True)

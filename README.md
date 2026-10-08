@@ -46,9 +46,14 @@ python main.py kpi_target_completion.sql
 
 # Show the browser during the run.
 python main.py kpi_target_completion.sql --show
+
+# Read saved SQL, page text and a screenshot in the background; does not save changes.
+python main.py kpi_target_completion.sql --inspect outputs/report_check
 ```
 
 The SQL input sequence intentionally uses **copy local SQL → editor Ctrl+A → Ctrl+V**. It does not replace Monaco's document model directly, so ThinkingData's custom parameter settings are not reset.
+
+Normal updates and automatic login recovery stay in the background unless `--show` is supplied. `--login` remains the explicit visible first-login command. Editor readiness waits up to 60 seconds and requires an actual editor or login form; matching the URL alone is not sufficient. Preserve the existing output-column aliases used by saved chart bindings. The updater stops if ThinkingData reports `图表未正常展示`, instead of confirming a broken chart.
 
 ## Automated Report Update Flow
 
